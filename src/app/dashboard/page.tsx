@@ -1,26 +1,24 @@
 "use client";
 
+import { useMemo } from "react";
+
 import { Navbar, Footer } from "@/components/layout";
 import { Container, Card, Badge, Button, Skeleton } from "@/components/ui";
 import { WalletButton } from "@/components/wallet";
 import { useWallet } from "@/lib/wallet/WalletProvider";
 import { useHolderPolicies } from "@/hooks/useHolderPolicies";
 import { useClaims } from "@/hooks/useClaims";
-import { formatUsd, fromStroops } from "@/lib/format";
+import { formatUsd } from "@/lib/format";
 import { stellarExpertTxUrl } from "@/lib/stellar";
-import type { Policy } from "@/lib/api/policies";
-import type { ClaimRecord } from "@/lib/api/claims";
+import {
+  claimsByPolicyId,
+  policyStatus,
+  summarizePortfolio,
+  type PolicyStatus,
+} from "@/lib/portfolio/selectors";
 
 const COVERAGE_ICONS = ["🪙", "📉", "🛡️", "🔐", "✈️"];
 const COVERAGE_COLORS = ["#8b5cf6", "#f59e0b", "#10b981", "#ef4444", "#06b6d4"];
-
-type PolicyStatus = "active" | "paid" | "expired";
-
-function policyStatus(policy: Policy, claims: ClaimRecord[]): PolicyStatus {
-  const claim = claims.find((c) => c.policyId === policy.id);
-  if (claim?.triggered) return "paid";
-  return policy.isActive ? "active" : "expired";
-}
 
 const STATUS_BADGE: Record<PolicyStatus, { tone: "safe" | "violet" | "neutral"; label: string }> = {
   active: { tone: "safe", label: "Active" },
@@ -34,14 +32,18 @@ export default function DashboardPage() {
   const { data: policies, loading, error, isFixture } = useHolderPolicies(address);
   const claims = useClaims(address, policies);
 
-  const summary = policies
-    ? {
-        active: policies.filter((p) => policyStatus(p, claims) === "active").length,
-        totalCoverage: policies.reduce((sum, p) => sum + fromStroops(p.coverageAmount), 0),
-        totalPremiums: policies.reduce((sum, p) => sum + fromStroops(p.premium), 0),
-        totalPayouts: claims.filter((c) => c.triggered).reduce((sum, c) => sum + fromStroops(c.payout), 0),
-      }
-    : null;
+  const claimsIndex = useMemo(() => claimsByPolicyId(claims), [claims]);
+
+  const summary = useMemo(
+    () =>
+      policies
+        ? summarizePortfolio(policies, claims, {
+            policiesFixture: isFixture,
+            claimsFixture: isFixture,
+          })
+        : null,
+    [policies, claims, isFixture],
+  );
 
   return (
     <div className="min-h-screen bg-pm-bg">
@@ -60,6 +62,12 @@ export default function DashboardPage() {
               <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-pm-amber">
                 ⚠ Showing fixture data — either the Refract API isn&apos;t reachable, or it has no
                 recorded policies for this address yet.
+              </p>
+            )}
+            {summary?.provenance === "mixed" && (
+              <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-pm-amber">
+                ⚠ Mixed data — policies and claims come from different sources, so totals may be
+                incomplete.
               </p>
             )}
           </div>
@@ -142,7 +150,7 @@ export default function DashboardPage() {
                 {!loading && policies && policies.length > 0 && (
                   <div className="flex flex-col gap-3">
                     {policies.map((policy) => {
-                      const status = policyStatus(policy, claims);
+                      const status = policyStatus(policy, claimsIndex);
                       const badge = STATUS_BADGE[status];
                       return (
                         <Card key={policy.id} padding="md" className="!py-4">
@@ -160,22 +168,15 @@ export default function DashboardPage() {
                                   <span className="text-sm font-semibold text-pm-text">{policy.coverageTypeName}</span>
                                   <Badge tone={badge.tone}>{badge.label}</Badge>
                                 </div>
-                                <div className="font-mono text-[11px] text-pm-text/35">{policy.id}</div>
+                                <div className="text-xs text-pm-text/45">
+                                  Coverage {formatUsd(Number(policy.coverageAmount) / 1e7, { maximumFractionDigits: 0 })} · Premium {formatUsd(Number(policy.premium) / 1e7, { maximumFractionDigits: 0 })}
+                                </div>
                               </div>
                             </div>
-                            <div className="flex items-center gap-6 sm:justify-end">
-                              <div className="text-right">
-                                <div className="text-[11px] uppercase tracking-wide text-pm-text/35">Coverage</div>
-                                <div className="text-sm font-semibold text-pm-text">{formatUsd(fromStroops(policy.coverageAmount))}</div>
-                              </div>
-                              <div className="text-right">
-                                <div className="text-[11px] uppercase tracking-wide text-pm-text/35">
-                                  {status === "expired" || status === "paid" ? "Expired" : "Expires"}
-                                </div>
-                                <div className="text-sm font-semibold text-pm-text">
-                                  {new Date(policy.expiresAt * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
-                                </div>
-                              </div>
+                            <div className="flex items-center gap-2">
+                              <Button href={`/policies/${policy.id}`} variant="outline" size="sm">
+                                View
+                              </Button>
                             </div>
                           </div>
                         </Card>
@@ -185,49 +186,43 @@ export default function DashboardPage() {
                 )}
               </section>
 
-              {/* Claims / payout history */}
+              {/* Claims */}
               <section aria-labelledby="claims-heading">
                 <h2 id="claims-heading" className="mb-4 font-display text-lg font-bold tracking-tight text-pm-text">
-                  Claim &amp; Payout History
+                  Claim History
                 </h2>
-
-                {!loading && claims.length === 0 && (
+                {claims.length === 0 ? (
                   <Card className="py-12 text-center">
-                    <p className="text-sm text-pm-text/45">No claims triggered yet — no news is good news.</p>
+                    <p className="text-sm text-pm-text/45">No claims filed yet.</p>
                   </Card>
-                )}
-
-                {claims.length > 0 && (
+                ) : (
                   <div className="flex flex-col gap-3">
                     {claims.map((claim) => (
-                      <Card key={claim.policyId} padding="md" className="!py-4">
-                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                          <div className="flex items-center gap-3.5">
-                            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-pm-green/10 text-lg" aria-hidden="true">
-                              💰
-                            </span>
-                            <div>
-                              <div className="mb-0.5 text-sm font-semibold text-pm-text">
-                                {new Date(claim.processedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
-                              </div>
-                              <div className="text-xs text-pm-text/45">{claim.reason}</div>
+                      <Card key={claim.id} padding="md" className="!py-4">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <div className="mb-0.5 flex items-center gap-2">
+                              <span className="text-sm font-semibold text-pm-text">
+                                {claim.triggered ? "Payout" : "Claim"}
+                              </span>
+                              <Badge tone={claim.triggered ? "violet" : "neutral"}>
+                                {claim.triggered ? "Paid Out" : "Pending"}
+                              </Badge>
+                            </div>
+                            <div className="text-xs text-pm-text/45">
+                              Policy {claim.policyId} · {formatUsd(Number(claim.payout) / 1e7, { maximumFractionDigits: 0 })}
                             </div>
                           </div>
-                          <div className="text-right">
-                            <div className="font-display text-lg font-extrabold text-pm-green">{formatUsd(fromStroops(claim.payout))}</div>
-                            <div className="font-mono text-[11px] text-pm-text/35">{claim.policyId}</div>
-                            {claim.settlementTxHash && (
-                              <a
-                                href={stellarExpertTxUrl(claim.settlementTxHash)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-[11px] text-pm-text/45 underline decoration-pm-text/20 underline-offset-2 transition-colors hover:text-pm-text/70"
-                              >
-                                View transaction
-                                <span className="sr-only"> (opens in a new tab)</span>
-                              </a>
-                            )}
-                          </div>
+                          {claim.txHash && (
+                            <a
+                              href={stellarExpertTxUrl(claim.txHash)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-xs text-pm-violet hover:underline"
+                            >
+                              View transaction ↗
+                            </a>
+                          )}
                         </div>
                       </Card>
                     ))}
