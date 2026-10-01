@@ -165,7 +165,7 @@ export default function DashboardPage() {
                                   <Badge tone={badge.tone}>{badge.label}</Badge>
                                 </div>
                                 <div className="text-xs text-pm-text/40">
-                                  {formatUsd(fromStroops(policy.coverageAmount), { maximumFractionDigits: 0 })} coverage
+                                  {formatUsd(fromStroops(policy.coverageAmount), { maximumFractionDigits: 0 })} coverage · expires {policy.expiresAt}
                                 </div>
                               </div>
                             </div>
@@ -181,6 +181,9 @@ export default function DashboardPage() {
                                   View tx
                                 </a>
                               )}
+                              <Button href={`/dashboard/policies/${policy.id}`} variant="outline" className="inline-flex">
+                                View details
+                              </Button>
                             </div>
                           </div>
                         </Card>
