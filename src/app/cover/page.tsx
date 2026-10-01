@@ -7,20 +7,37 @@ import { WalletButton } from "@/components/wallet";
 import { useWallet } from "@/lib/wallet/WalletProvider";
 import { useCoverageTypes } from "@/hooks/useCoverageTypes";
 import { useCoverageBounds } from "@/hooks/useCoverageBounds";
+import { usePoolStats } from "@/hooks/usePoolStats";
+import { computePoolCapacity } from "@/lib/pool/capacity";
 import { buyPolicy, type BuyPolicyResponse } from "@/lib/api/policies";
 import { ApiUnreachableError } from "@/lib/api/client";
 import { formatUsd, toStroops } from "@/lib/format";
 import { truncateAddress } from "@/lib/wallet/WalletProvider";
 import { signAndSubmit } from "@/lib/wallet/signAndSubmit";
+import { coverageMeta, RISK_LEVEL_COLORS } from "@/lib/coverage/metadata";
 
-const RISK_TAG_COLORS: Record<string, string> = {
-  low: "#10b981",
-  medium: "#8b5cf6",
-  high: "#f59e0b",
-  critical: "#ef4444",
-};
+// Neutral fallbacks for risk levels the backend may introduce before this
+// client knows about them. Deliberately muted so an unknown level never
+// implies a specific risk tier the policy doesn't actually have.
+const NEUTRAL_RISK_COLOR = "#6b7280";
+const NEUTRAL_RISK_HEAT = 50;
 
-const RISK_HEAT: Record<string, number> = { low: 20, medium: 45, high: 72, critical: 95 };
+function riskColor(riskLevel: string | undefined): string {
+  if (riskLevel && Object.prototype.hasOwnProperty.call(RISK_TAG_COLORS, riskLevel)) {
+    return RISK_TAG_COLORS[riskLevel] as string;
+  }
+  if (process.env.NODE_ENV !== "production" && riskLevel !== undefined) {
+    console.warn(`[cover] Unknown risk level "${riskLevel}" — using neutral fallback`);
+  }
+  return NEUTRAL_RISK_COLOR;
+}
+
+function riskHeat(riskLevel: string | undefined): number {
+  if (riskLevel && Object.prototype.hasOwnProperty.call(RISK_HEAT, riskLevel)) {
+    return RISK_HEAT[riskLevel] as number;
+  }
+  return NEUTRAL_RISK_HEAT;
+}
 
 const QUICK_AMOUNTS = [1_000, 5_000, 10_000, 25_000];
 
@@ -28,6 +45,7 @@ export default function CoverPage() {
   const wallet = useWallet();
   const { data: coverageTypes, loading: typesLoading, error: typesError, isFixture } = useCoverageTypes();
   const { minCoverage: chainMinCoverage, maxCoverage: chainMaxCoverage } = useCoverageBounds();
+  const { data: poolStats, loading: poolLoading, error: poolError, isFixture: poolIsFixture } = usePoolStats();
 
   const [selectedType, setSelectedType] = useState(0);
   const [coverageAmount, setCoverageAmount] = useState("5000");
@@ -44,7 +62,8 @@ export default function CoverPage() {
   const radioRefs = useRef<Record<number, HTMLButtonElement | null>>({});
   const buyButtonRef = useRef<HTMLButtonElement | null>(null);
 
-  const ct = coverageTypes?.[selectedType];
+  const ct = coverageTypes?.find((t) => t.id === selectedType);
+  const meta = coverageMeta(ct?.id ?? selectedType);
 
   const premium = useMemo(() => {
     if (!ct) return 0;
@@ -63,12 +82,38 @@ export default function CoverPage() {
   // which can be tighter than a given type's advertised catalog max (see
   // PolicyService.onChainCoverageBounds' doc comment in the backend) —
   // clamp against both so this can't approve an amount the pool would
-  // actually reject.
+  // actually reject. A third constraint is the pool's own free capital:
+  // even a catalogue-legal amount can exceed what the pool can currently
+  // back, so we also cap against the writable capacity derived from live
+  // pool stats (respecting maxUtilizationBps).
   const effectiveMin = Math.max(100, chainMinCoverage ?? 0);
-  const effectiveMax = ct ? Math.min(ct.maxCoverage, chainMaxCoverage ?? ct.maxCoverage) : 0;
-  const amountInvalid = ct
-    ? parseFloat(coverageAmount || "0") < effectiveMin || parseFloat(coverageAmount) > effectiveMax
-    : false;
+  const catalogueMax = ct ? Math.min(ct.maxCoverage, chainMaxCoverage ?? ct.maxCoverage) : 0;
+
+  // Fixture-derived stats must not be presented as a verified capacity limit.
+  const capacityVerified = !!poolStats && !poolIsFixture;
+  const capacity = useMemo(
+    () => (capacityVerified && poolStats ? computePoolCapacity(poolStats) : null),
+    [capacityVerified, poolStats],
+  );
+
+  const effectiveMax = capacity ? Math.min(catalogueMax, capacity.maxCoverage) : catalogueMax;
+
+  const amount = parseFloat(coverageAmount || "0");
+  const amountInvalid = ct ? amount < effectiveMin || amount > effectiveMax : false;
+
+  // Name the binding constraint so the buyer knows what to change.
+  const amountError = useMemo(() => {
+    if (!ct || !amountInvalid) return null;
+    if (amount < effectiveMin) return `Minimum coverage is ${formatUsd(effectiveMin)}.`;
+    if (capacity && capacity.exhausted) {
+      return "Coverage is temporarily unavailable — the pool has no free capacity right now.";
+    }
+    if (capacity && capacity.maxCoverage < catalogueMax) {
+      return `The pool can currently back up to ${formatUsd(capacity.maxCoverage)} of coverage. Try a smaller amount.`;
+    }
+    return `Maximum coverage for this type is ${formatUsd(catalogueMax)}.`;
+  }, [ct, amountInvalid, amount, effectiveMin, capacity, catalogueMax]);
+
   const isFlightDelay = ct?.id === 4;
   const flightNumberInvalid = isFlightDelay && flightNumber.trim().length === 0;
 
@@ -89,6 +134,21 @@ export default function CoverPage() {
 
     // Re-validate against the (possibly newly connected) session before acting.
     if (amountInvalid || flightNumberInvalid) return;
+
+    // Capacity can change between page load and submit — re-check against
+    // the freshest stats before building the transaction.
+    if (capacityVerified && poolStats) {
+      const fresh = computePoolCapacity(poolStats);
+      if (amount > fresh.maxCoverage) {
+        setSubmission({
+          status: "error",
+          message: fresh.exhausted
+            ? "Coverage is temporarily unavailable — the pool has no free capacity right now."
+            : `The pool can currently back up to ${formatUsd(fresh.maxCoverage)} of coverage. Try a smaller amount.`,
+        });
+        return;
+      }
+    }
 
     setSubmission({ status: "submitting" });
     try {
@@ -186,6 +246,7 @@ export default function CoverPage() {
                       if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
                       e.preventDefault();
                       const ids = coverageTypes.map((t) => t.id);
+                      if (ids.length === 0) return;
                       const currentIndex = ids.indexOf(selectedType);
                       let nextIndex = currentIndex;
                       if (e.key === "ArrowDown") nextIndex = (currentIndex + 1) % ids.length;
@@ -193,12 +254,14 @@ export default function CoverPage() {
                       if (e.key === "Home") nextIndex = 0;
                       if (e.key === "End") nextIndex = ids.length - 1;
                       const nextId = ids[nextIndex];
+                      if (nextId === undefined) return;
                       setSelectedType(nextId);
                       radioRefs.current[nextId]?.focus();
                     }}
                   >
                     {coverageTypes.map((t) => {
-                      const active = t.id === selectedType;
+                      const tMeta = coverageMeta(t.id);
+                      const selected = t.id === selectedType;
                       return (
                         <button
                           key={t.id}
@@ -207,26 +270,30 @@ export default function CoverPage() {
                           }}
                           type="button"
                           role="radio"
-                          aria-checked={active}
-                          tabIndex={active ? 0 : -1}
+                          aria-checked={selected}
+                          tabIndex={selected ? 0 : -1}
                           onClick={() => setSelectedType(t.id)}
                           className={`flex w-full items-center justify-between rounded-xl border px-4 py-3.5 text-left transition-colors ${
-                            active
+                            selected
                               ? "border-pm-violet/60 bg-pm-violet/[0.08]"
                               : "border-pm-border bg-pm-surface hover:border-pm-border/80"
                           }`}
                         >
                           <div className="flex items-center gap-3">
-                            <span
-                              className="h-2.5 w-2.5 rounded-full"
-                              style={{ backgroundColor: RISK_TAG_COLORS[t.riskLevel] ?? "#8b5cf6" }}
-                            />
+                            <span aria-hidden="true" className="text-xl">
+                              {tMeta.icon}
+                            </span>
                             <div>
                               <div className="text-sm font-semibold text-pm-text">{t.name}</div>
-                              <div className="text-[11px] text-pm-text/40">{t.description}</div>
+                              <div className="text-[11px] text-pm-text/40">{tMeta.triggerSummary}</div>
                             </div>
                           </div>
-                          <Badge color={RISK_TAG_COLORS[t.riskLevel] ?? "#8b5cf6"}>{t.riskLevel}</Badge>
+                          <Badge
+                            style={{ color: RISK_LEVEL_COLORS[tMeta.riskLevel] }}
+                            className="!border-current/30"
+                          >
+                            {tMeta.riskLevel}
+                          </Badge>
                         </button>
                       );
                     })}

@@ -8,8 +8,12 @@ import { WalletButton } from "@/components/wallet";
 import { useWallet } from "@/lib/wallet/WalletProvider";
 import { useHolderPolicies } from "@/hooks/useHolderPolicies";
 import { useClaims } from "@/hooks/useClaims";
-import { formatUsd } from "@/lib/format";
+import { usePagination } from "@/hooks/usePagination";
+import { formatUsd, fromStroops } from "@/lib/format";
 import { stellarExpertTxUrl } from "@/lib/stellar";
+import { getCoverageIcon, getCoverageColor } from "@/lib/coverage/metadata";
+import type { Policy } from "@/lib/api/policies";
+import type { ClaimRecord } from "@/lib/api/claims";
 import {
   claimsByPolicyId,
   policyStatus,
@@ -19,6 +23,16 @@ import {
 
 const COVERAGE_ICONS = ["🪙", "📉", "🛡️", "🔐", "✈️"];
 const COVERAGE_COLORS = ["#8b5cf6", "#f59e0b", "#10b981", "#ef4444", "#06b6d4"];
+const PAGE_SIZE = 10;
+
+type PolicyStatus = "active" | "paid" | "expired";
+
+function policyStatus(policy: Policy, claims: ClaimRecord[], claimsLoading: boolean): PolicyStatus {
+  const claim = claims.find((c) => c.policyId === policy.id);
+  if (claim?.triggered) return "paid";
+  if (claimsLoading) return policy.isActive ? "active" : "expired";
+  return policy.isActive ? "active" : "expired";
+}
 
 const STATUS_BADGE: Record<PolicyStatus, { tone: "safe" | "violet" | "neutral"; label: string }> = {
   active: { tone: "safe", label: "Active" },
@@ -29,8 +43,24 @@ const STATUS_BADGE: Record<PolicyStatus, { tone: "safe" | "violet" | "neutral"; 
 export default function DashboardPage() {
   const wallet = useWallet();
   const address = wallet.status === "connected" ? wallet.address : null;
-  const { data: policies, loading, error, isFixture } = useHolderPolicies(address);
-  const claims = useClaims(address, policies);
+  const { data: policies, loading, error, source } = useHolderPolicies(address);
+  const { data: claims, lo
+const STATUS_BADGE: Record<PolicyStatus, { tone: "safe" | "violet" | "neutral"; label: string }> = {
+  active: { tone: "safe", label: "Active" },
+  paid: { tone: "violet", label: "Paid Out" },
+  expired: { tone: "neutral", label: "Expired" },
+};
+
+export default function DashboardPage() {
+  const wallet = useWallet();
+  const address = wallet.status === "connected" ? wallet.address : null;
+  const { data: policies, loading, error, source } = useHolderPolicies(address);
+  const { data: claims, loading: claimsLoading, error: claimsError } = useClaims(address, policies);
+
+  const policyList = policies ?? [];
+  const claimList = claims ?? [];
+  const policiesPagination = usePagination(policyList, PAGE_SIZE);
+  const claimsPagination = usePagination(claimList, PAGE_SIZE);
 
   const claimsIndex = useMemo(() => claimsByPolicyId(claims), [claims]);
 
@@ -45,6 +75,8 @@ export default function DashboardPage() {
     [policies, claims, isFixture],
   );
 
+  const summaryLoading = loading || claimsLoading || !summary;
+
   return (
     <div className="min-h-screen bg-pm-bg">
       <Navbar right={<WalletButton />} />
@@ -58,10 +90,14 @@ export default function DashboardPage() {
             <p className="text-sm text-pm-text/45">
               Your active policies, claim status, and payout history in one place.
             </p>
-            {isFixture && (
+            {source === "fixture-unreachable" && (
               <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-pm-amber">
-                ⚠ Showing fixture data — either the Refract API isn&apos;t reachable, or it has no
-                recorded policies for this address yet.
+                ⚠ Showing fixture data — the Refract API isn&apos;t reachable right now.
+              </p>
+            )}
+            {source === "fixture-demo" && (
+              <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-pm-amber">
+                ⚠ Showing demo fixture data — demo mode is enabled for this address.
               </p>
             )}
             {summary?.provenance === "mixed" && (
@@ -96,7 +132,7 @@ export default function DashboardPage() {
             <>
               {/* Summary */}
               <div className="mb-7 grid grid-cols-2 gap-3.5 sm:grid-cols-4">
-                {loading || !summary
+                {summaryLoading
                   ? Array.from({ length: 4 }).map((_, i) => (
                       <Card key={i} padding="sm" className="!p-[18px]">
                         <Skeleton height={11} width={70} className="mb-2.5" />
@@ -149,8 +185,8 @@ export default function DashboardPage() {
 
                 {!loading && policies && policies.length > 0 && (
                   <div className="flex flex-col gap-3">
-                    {policies.map((policy) => {
-                      const status = policyStatus(policy, claimsIndex);
+                    {policiesPagination.visible.map((policy) => {
+                      const status = policyStatus(policy, claims, claimsLoading);
                       const badge = STATUS_BADGE[status];
                       return (
                         <Card key={policy.id} padding="md" className="!py-4">
@@ -158,30 +194,51 @@ export default function DashboardPage() {
                             <div className="flex items-center gap-3.5">
                               <span
                                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-lg"
-                                style={{ background: `${COVERAGE_COLORS[policy.coverageType]}18` }}
+                                style={{ background: `${getCoverageColor(policy.coverageType)}18` }}
                                 aria-hidden="true"
                               >
-                                {COVERAGE_ICONS[policy.coverageType]}
+                                {getCoverageIcon(policy.coverageType)}
                               </span>
                               <div>
-                                <div className="mb-0.5 flex items-center gap-2">
-                                  <span className="text-sm font-semibold text-pm-text">{policy.coverageTypeName}</span>
-                                  <Badge tone={badge.tone}>{badge.label}</Badge>
+                                <div className="mb-0.5 font-display text-[15px] font-bold text-pm-text">
+                                  {policy.coverageTypeName}
                                 </div>
-                                <div className="text-xs text-pm-text/45">
-                                  Coverage {formatUsd(Number(policy.coverageAmount) / 1e7, { maximumFractionDigits: 0 })} · Premium {formatUsd(Number(policy.premium) / 1e7, { maximumFractionDigits: 0 })}
+                                <div className="text-xs text-pm-text/40">
+                                  {formatUsd(fromStroops(policy.coverageAmount), { maximumFractionDigits: 0 })} coverage
                                 </div>
                               </div>
                             </div>
-                            <div className="flex items-center gap-2">
-                              <Button href={`/policies/${policy.id}`} variant="outline" size="sm">
-                                View
+                            <div className="flex items-center gap-4 text-xs text-pm-text/45">
+                              <span>Premium {formatUsd(fromStroops(policy.premium), { maximumFractionDigits: 0 })}</span>
+                              {policy.txHash && (
+                                <a
+                                  href={stellarExpertTxUrl(policy.txHash)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-pm-violet hover:underline"
+                                >
+                                  View tx
+                                </a>
+                              )}
+                              <Button href={`/dashboard/policies/${policy.id}`} variant="outline" className="inline-flex">
+                                View details
                               </Button>
                             </div>
                           </div>
                         </Card>
                       );
                     })}
+
+                    <div className="mt-1 flex flex-col items-center gap-2">
+                      <p className="text-xs text-pm-text/40" aria-live="polite">
+                        Showing {policiesPagination.visible.length} of {policiesPagination.total} policies
+                      </p>
+                      {policiesPagination.hasMore && (
+                        <Button type="button" variant="outline" onClick={policiesPagination.loadMore}>
+                          Load more policies
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 )}
               </section>
@@ -191,19 +248,35 @@ export default function DashboardPage() {
                 <h2 id="claims-heading" className="mb-4 font-display text-lg font-bold tracking-tight text-pm-text">
                   Claim History
                 </h2>
-                {claims.length === 0 ? (
+                {claimsError && (
+                  <Card className="border-pm-red/30 !bg-pm-red/[0.04]">
+                    <p className="text-sm text-pm-red">Couldn&apos;t load claims: {claimsError}</p>
+                  </Card>
+                )}
+
+                {claimsLoading && (
+                  <div className="flex flex-col gap-3" role="status" aria-label="Loading claims">
+                    {Array.from({ length: 2 }).map((_, i) => (
+                      <Skeleton key={i} height={72} rounded="md" />
+                    ))}
+                  </div>
+                )}
+
+                {!claimsLoading && claimList.length === 0 && (
                   <Card className="py-12 text-center">
                     <p className="text-sm text-pm-text/45">No claims filed yet.</p>
                   </Card>
-                ) : (
+                )}
+
+                {!claimsLoading && claimList.length > 0 && (
                   <div className="flex flex-col gap-3">
-                    {claims.map((claim) => (
+                    {claimsPagination.visible.map((claim) => (
                       <Card key={claim.id} padding="md" className="!py-4">
-                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                           <div>
                             <div className="mb-0.5 flex items-center gap-2">
                               <span className="text-sm font-semibold text-pm-text">
-                                {claim.triggered ? "Payout" : "Claim"}
+                                Claim #{claim.id}
                               </span>
                               <Badge tone={claim.triggered ? "violet" : "neutral"}>
                                 {claim.triggered ? "Paid Out" : "Pending"}
@@ -212,20 +285,48 @@ export default function DashboardPage() {
                             <div className="text-xs text-pm-text/45">
                               Policy {claim.policyId} · {formatUsd(Number(claim.payout) / 1e7, { maximumFractionDigits: 0 })}
                             </div>
+                              </span>
+                              <Badge tone={claim.triggered ? "violet" : "neutral"}>
+                                {claim.triggered ? "Paid Out" : "Pending"}
+                              </Badge>
+                            </div>
+                            <div className="text-xs text-pm-text/40">
+                              Policy #{claim.policyId}
+                              {claim.txHash && (
+                                <>
+                                  {" · "}
+                                  <a
+                                    href={stellarExpertTxUrl(claim.txHash)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-pm-violet hover:underline"
+                                  >
+                                    View transaction
+                                  </a>
+                                </>
+                              )}
+                            </div>
                           </div>
-                          {claim.txHash && (
-                            <a
-                              href={stellarExpertTxUrl(claim.txHash)}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-xs text-pm-violet hover:underline"
-                            >
-                              View transaction ↗
-                            </a>
-                          )}
+                          <div className="text-right">
+                            <div className="text-[11px] uppercase tracking-wide text-pm-text/40">Payout</div>
+                            <div className="text-sm font-semibold text-pm-text">
+                              {formatUsd(fromStroops(claim.payout), { maximumFractionDigits: 2 })}
+                            </div>
+                          </div>
                         </div>
                       </Card>
                     ))}
+
+                    <div className="mt-1 flex flex-col items-center gap-2">
+                      <p className="text-xs text-pm-text/40" aria-live="polite">
+                        Showing {claimsPagination.visible.length} of {claimsPagination.total} claims
+                      </p>
+                      {claimsPagination.hasMore && (
+                        <Button type="button" variant="outline" onClick={claimsPagination.loadMore}>
+                          Load more claims
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 )}
               </section>
