@@ -11,7 +11,7 @@ import { useUserPoolPosition } from "@/hooks/useUserPoolPosition";
 import { useLockupStatus } from "@/hooks/useLockupStatus";
 import { provideCapital, withdrawCapital, type ProvideCapitalResponse, type WithdrawCapitalResponse } from "@/lib/api/pool";
 import { ApiUnreachableError } from "@/lib/api/client";
-import { formatUsd, fromStroops, toStroops } from "@/lib/format";
+import { formatUsd, formatCompactUsd, formatSharePrice, fromStroops, toStroops } from "@/lib/format";
 import { signAndSubmit } from "@/lib/wallet/signAndSubmit";
 import { truncateAddress } from "@/lib/wallet/WalletProvider";
 
@@ -157,137 +157,180 @@ export default function ProvidePage() {
           {/* Stats */}
           <div className="mb-7 grid grid-cols-2 gap-3 sm:grid-cols-4">
             <Card className="p-4">
-              <div className="text-[11px] uppercase tracking-wider text-pm-text/40">Total Pool</div>
-              <div className="mt-1 font-display text-lg font-bold text-pm-text">
-                {poolLoading ? <Skeleton className="h-6 w-20" /> : formatUsd(pool?.totalAssets ?? 0)}
-              </div>
+              <div className="mb-1 text-[11px] uppercase tracking-wider text-pm-text/40">Pool TVL</div>
+              {poolLoading ? (
+                <Skeleton className="h-7 w-24" />
+              ) : (
+                <div className="font-display text-xl font-bold text-pm-text">
+                  {formatCompactUsd(fromStroops(pool?.totalUsdc ?? "0"))}
+                </div>
+              )}
             </Card>
             <Card className="p-4">
-              <div className="text-[11px] uppercase tracking-wider text-pm-text/40">Share Price</div>
-              <div className="mt-1 font-display text-lg font-bold text-pm-text">
-                {poolLoading ? <Skeleton className="h-6 w-16" /> : `$${sharePrice.toFixed(4)}`}
-              </div>
+              <div className="mb-1 text-[11px] uppercase tracking-wider text-pm-text/40">Share Price</div>
+              {poolLoading ? (
+                <Skeleton className="h-7 w-16" />
+              ) : (
+                <div className="font-display text-xl font-bold text-pm-text">{formatSharePrice(sharePrice)}</div>
+              )}
             </Card>
             <Card className="p-4">
-              <div className="text-[11px] uppercase tracking-wider text-pm-text/40">Utilization</div>
-              <div className="mt-1 font-display text-lg font-bold text-pm-text">
-                {poolLoading ? <Skeleton className="h-6 w-14" /> : `${utilizationPct.toFixed(1)}%`}
-              </div>
+              <div className="mb-1 text-[11px] uppercase tracking-wider text-pm-text/40">Utilization</div>
+              {poolLoading ? (
+                <Skeleton className="h-7 w-16" />
+              ) : (
+                <div className="font-display text-xl font-bold text-pm-text">{utilizationPct.toFixed(1)}%</div>
+              )}
             </Card>
             <Card className="p-4">
-              <div className="text-[11px] uppercase tracking-wider text-pm-text/40">Your Position</div>
-              <div className="mt-1 font-display text-lg font-bold text-pm-text">
-                {wallet.status === "connected" ? formatUsd(availableToWithdraw) : "—"}
-              </div>
+              <div className="mb-1 text-[11px] uppercase tracking-wider text-pm-text/40">Your Position</div>
+              {wallet.status !== "connected" ? (
+                <div className="font-display text-xl font-bold text-pm-text/30">—</div>
+              ) : (
+                <div className="font-display text-xl font-bold text-pm-text">{formatUsd(availableToWithdraw)}</div>
+              )}
             </Card>
           </div>
 
           <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
-            {/* Form */}
-            <Card className="p-5 sm:p-6">
-              <div className="mb-5 flex gap-1 rounded-lg bg-pm-bg/60 p-1">
-                <button
-                  type="button"
-                  onClick={() => setTab("deposit")}
-                  className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-                    tab === "deposit" ? "bg-pm-violet text-white" : "text-pm-text/50 hover:text-pm-text"
-                  }`}
-                >
-                  Deposit
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setTab("withdraw")}
-                  className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-                    tab === "withdraw" ? "bg-pm-violet text-white" : "text-pm-text/50 hover:text-pm-text"
-                  }`}
-                >
-                  Withdraw
-                </button>
-              </div>
-
-              <label className="mb-1.5 block text-xs font-medium text-pm-text/60" htmlFor="amount">
-                Amount (USDC)
-              </label>
-              <Input
-                id="amount"
-                inputMode="decimal"
-                placeholder="0.00"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-              />
-
-              {tab === "withdraw" && (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {withdrawQuickPct.map((q) => (
+            {/* Main panel */}
+            <div className="space-y-6">
+              <Card className="p-5 sm:p-6">
+                <div className="mb-5 flex gap-1 rounded-lg bg-pm-bg/60 p-1">
+                  {(["deposit", "withdraw"] as const).map((t) => (
                     <button
-                      key={q.label}
-                      type="button"
-                      onClick={() => setAmount(q.value.toFixed(2))}
-                      className="rounded-md border border-pm-border px-2.5 py-1 text-xs text-pm-text/60 hover:border-pm-violet hover:text-pm-text"
+                      key={t}
+                      onClick={() => {
+                        setTab(t);
+                        setAmount("");
+                        setSubmission({ status: "idle" });
+                      }}
+                      className={`flex-1 rounded-md px-4 py-2 text-sm font-medium capitalize transition-colors ${
+                        tab === t ? "bg-pm-violet text-white" : "text-pm-text/50 hover:text-pm-text"
+                      }`}
                     >
-                      {q.label}
+                      {t}
                     </button>
                   ))}
                 </div>
-              )}
 
-              <div className="mt-4 space-y-1.5 text-xs text-pm-text/50">
-                {tab === "deposit" ? (
-                  <div className="flex justify-between">
-                    <span>Shares out</span>
-                    <span className="text-pm-text/80">{sharesOut}</span>
+                <div className="mb-4">
+                  <label className="mb-2 block text-xs font-medium text-pm-text/50">
+                    {tab === "deposit" ? "Amount to deposit (USDC)" : "Amount to withdraw (USDC)"}
+                  </label>
+                  <div className="relative">
+                    <Input
+                      type="number"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={amount}
+                      onChange={(e) => setAmount(e.target.value)}
+                      className="pr-16"
+                    />
+                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-medium text-pm-text/40">
+                      USDC
+                    </span>
                   </div>
-                ) : (
-                  <div className="flex justify-between">
-                    <span>USDC out</span>
-                    <span className="text-pm-text/80">{usdcOut}</span>
-                  </div>
-                )}
-                <div className="flex justify-between">
-                  <span>Available to withdraw</span>
-                  <span className="text-pm-text/80">{formatUsd(availableToWithdraw)}</span>
-                </div>
-              </div>
-
-              {withdrawInvalid && (
-                <p className="mt-3 text-xs text-pm-red">Amount exceeds your available position.</p>
-              )}
-              {tab === "withdraw" && isLocked && (
-                <p className="mt-3 text-xs text-pm-amber">
-                  Your position is locked until {new Date(lockupExpiresAt! * 1000).toLocaleDateString()}.
-                </p>
-              )}
-
-              <Button className="mt-5 w-full" onClick={handleSubmit} disabled={submission.status === "submitting" || submission.status === "signing"}>
-                {wallet.status !== "connected"
-                  ? "Connect Wallet"
-                  : submission.status === "submitting"
-                  ? "Submitting…"
-                  : submission.status === "signing"
-                  ? "Awaiting signature…"
-                  : tab === "deposit"
-                  ? "Deposit"
-                  : "Withdraw"}
-              </Button>
-
-              {submission.status === "success" && (
-                <div className="mt-4 rounded-lg border border-pm-green/30 bg-pm-green/5 p-3 text-xs text-pm-text/70">
-                  <div className="mb-1 font-medium text-pm-green">
-                    {submission.kind === "deposit" ? "Deposit submitted" : "Withdrawal submitted"}
-                  </div>
-                  {submission.demo && <div className="text-pm-amber">Simulated locally (backend unreachable).</div>}
-                  {submission.txHash && (
-                    <div className="mt-1 break-all font-mono text-[11px] text-pm-text/50">
-                      tx: {truncateAddress(submission.txHash)}
+                  {tab === "withdraw" && wallet.status === "connected" && (
+                    <div className="mt-2 flex items-center justify-between text-[11px] text-pm-text/40">
+                      <span>Available: {formatUsd(availableToWithdraw)}</span>
+                      <div className="flex gap-1">
+                        {withdrawQuickPct.map((q) => (
+                          <button
+                            key={q.label}
+                            onClick={() => setAmount(q.value.toFixed(2))}
+                            className="rounded px-2 py-0.5 text-[11px] text-pm-violet hover:bg-pm-violet/10"
+                          >
+                            {q.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>
-              )}
-              {submission.status === "error" && (
-                <p className="mt-4 text-xs text-pm-red">{submission.message}</p>
-              )}
-            </Card>
+
+                {amount && parseFloat(amount) > 0 && (
+                  <div className="mb-4 space-y-1.5 rounded-lg bg-pm-bg/60 p-3 text-xs">
+                    {tab === "deposit" ? (
+                      <div className="flex justify-between">
+                        <span className="text-pm-text/40">Shares received</span>
+                        <span className="font-mono text-pm-text">{sharesOut}</span>
+                      </div>
+                    ) : (
+                      <div className="flex justify-between">
+                        <span className="text-pm-text/40">USDC received</span>
+                        <span className="font-mono text-pm-text">{usdcOut}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between">
+                      <span className="text-pm-text/40">Share price</span>
+                      <span className="font-mono text-pm-text">{formatSharePrice(sharePrice)}</span>
+                    </div>
+                  </div>
+                )}
+
+                {withdrawInvalid && (
+                  <p className="mb-4 text-xs text-pm-red">Amount exceeds your available balance.</p>
+                )}
+                {tab === "withdraw" && isLocked && (
+                  <p className="mb-4 text-xs text-pm-amber">
+                    Your capital is locked until {new Date(lockupExpiresAt! * 1000).toLocaleDateString()}.
+                  </p>
+                )}
+
+                <Button
+                  onClick={handleSubmit}
+                  disabled={
+                    submission.status === "submitting" ||
+                    submission.status === "signing" ||
+                    !amount ||
+                    parseFloat(amount) <= 0 ||
+                    withdrawInvalid ||
+                    (tab === "withdraw" && isLocked)
+                  }
+                  className="w-full"
+                >
+                  {submission.status === "submitting" || submission.status === "signing"
+                    ? "Processing…"
+                    : wallet.status !== "connected"
+                    ? "Connect Wallet"
+                    : tab === "deposit"
+                    ? "Deposit"
+                    : "Withdraw"}
+                </Button>
+
+                {submission.status === "success" && (
+                  <div className="mt-4 rounded-lg border border-pm-green/30 bg-pm-green/5 p-3 text-xs">
+                    <p className="font-medium text-pm-green">
+                      {submission.kind === "deposit" ? "Deposit" : "Withdrawal"} submitted
+                      {submission.demo ? " (simulated)" : ""}
+                    </p>
+                    {submission.txHash && (
+                      <p className="mt-1 font-mono text-pm-text/50">{truncateAddress(submission.txHash)}</p>
+                    )}
+                  </div>
+                )}
+                {submission.status === "error" && (
+                  <p className="mt-4 text-xs text-pm-red">{submission.message}</p>
+                )}
+              </Card>
+
+              <Card className="p-5 sm:p-6">
+                <h2 className="mb-4 font-display text-sm font-bold text-pm-text">Pool Allocation</h2>
+                <div className="flex flex-col items-center gap-6 sm:flex-row">
+                  <canvas ref={canvasRef} style={{ width: 160, height: 160 }} />
+                  <div className="flex-1 space-y-2">
+                    {RISK_BREAKDOWN.map((seg) => (
+                      <div key={seg.type} className="flex items-center gap-2 text-xs">
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: seg.color }} />
+                        <span className="flex-1 text-pm-text/60">{seg.type}</span>
+                        <span className="font-mono text-pm-text">{seg.pct}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </Card>
+            </div>
 
             {/* Sidebar */}
             <div className="space-y-6">
@@ -307,6 +350,33 @@ export default function ProvidePage() {
                       </li>
                     ))}
                   </ul>
+                </div>
+
+                <h2 className="mb-4 mt-6 font-display text-sm font-bold text-pm-text">Pool Stats</h2>
+                <div className="space-y-3 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-pm-text/40">Total capital</span>
+                    <span className="font-mono text-pm-text">
+                      {formatCompactUsd(fromStroops(pool?.totalUsdc ?? "0"))}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-pm-text/40">Locked capital</span>
+                    <span className="font-mono text-pm-text">
+                      {formatCompactUsd(fromStroops(pool?.lockedUsdc ?? "0"))}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-pm-text/40">Share price</span>
+                    <span className="font-mono text-pm-text">{formatSharePrice(sharePrice)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-pm-text/40">Utilization</span>
+                    <span className="font-mono text-pm-text">
+                      {utilizationPct.toFixed(1)}% / {maxUtilizationPct.toFixed(0)}%
+                    </span>
+                  </div>
+                </div>
                 </div>
               </Card>
 

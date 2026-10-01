@@ -7,6 +7,8 @@ import { WalletButton } from "@/components/wallet";
 import { useWallet } from "@/lib/wallet/WalletProvider";
 import { useCoverageTypes } from "@/hooks/useCoverageTypes";
 import { useCoverageBounds } from "@/hooks/useCoverageBounds";
+import { usePoolStats } from "@/hooks/usePoolStats";
+import { computePoolCapacity } from "@/lib/pool/capacity";
 import { buyPolicy, type BuyPolicyResponse } from "@/lib/api/policies";
 import { ApiUnreachableError } from "@/lib/api/client";
 import { formatUsd, toStroops } from "@/lib/format";
@@ -20,6 +22,7 @@ export default function CoverPage() {
   const wallet = useWallet();
   const { data: coverageTypes, loading: typesLoading, error: typesError, isFixture } = useCoverageTypes();
   const { minCoverage: chainMinCoverage, maxCoverage: chainMaxCoverage } = useCoverageBounds();
+  const { data: poolStats, loading: poolLoading, error: poolError, isFixture: poolIsFixture } = usePoolStats();
 
   const [selectedType, setSelectedType] = useState(0);
   const [coverageAmount, setCoverageAmount] = useState("5000");
@@ -54,12 +57,38 @@ export default function CoverPage() {
   // which can be tighter than a given type's advertised catalog max (see
   // PolicyService.onChainCoverageBounds' doc comment in the backend) —
   // clamp against both so this can't approve an amount the pool would
-  // actually reject.
+  // actually reject. A third constraint is the pool's own free capital:
+  // even a catalogue-legal amount can exceed what the pool can currently
+  // back, so we also cap against the writable capacity derived from live
+  // pool stats (respecting maxUtilizationBps).
   const effectiveMin = Math.max(100, chainMinCoverage ?? 0);
-  const effectiveMax = ct ? Math.min(ct.maxCoverage, chainMaxCoverage ?? ct.maxCoverage) : 0;
-  const amountInvalid = ct
-    ? parseFloat(coverageAmount || "0") < effectiveMin || parseFloat(coverageAmount) > effectiveMax
-    : false;
+  const catalogueMax = ct ? Math.min(ct.maxCoverage, chainMaxCoverage ?? ct.maxCoverage) : 0;
+
+  // Fixture-derived stats must not be presented as a verified capacity limit.
+  const capacityVerified = !!poolStats && !poolIsFixture;
+  const capacity = useMemo(
+    () => (capacityVerified && poolStats ? computePoolCapacity(poolStats) : null),
+    [capacityVerified, poolStats],
+  );
+
+  const effectiveMax = capacity ? Math.min(catalogueMax, capacity.maxCoverage) : catalogueMax;
+
+  const amount = parseFloat(coverageAmount || "0");
+  const amountInvalid = ct ? amount < effectiveMin || amount > effectiveMax : false;
+
+  // Name the binding constraint so the buyer knows what to change.
+  const amountError = useMemo(() => {
+    if (!ct || !amountInvalid) return null;
+    if (amount < effectiveMin) return `Minimum coverage is ${formatUsd(effectiveMin)}.`;
+    if (capacity && capacity.exhausted) {
+      return "Coverage is temporarily unavailable — the pool has no free capacity right now.";
+    }
+    if (capacity && capacity.maxCoverage < catalogueMax) {
+      return `The pool can currently back up to ${formatUsd(capacity.maxCoverage)} of coverage. Try a smaller amount.`;
+    }
+    return `Maximum coverage for this type is ${formatUsd(catalogueMax)}.`;
+  }, [ct, amountInvalid, amount, effectiveMin, capacity, catalogueMax]);
+
   const isFlightDelay = ct?.id === 4;
   const flightNumberInvalid = isFlightDelay && flightNumber.trim().length === 0;
 
@@ -70,6 +99,21 @@ export default function CoverPage() {
       return;
     }
     if (amountInvalid || flightNumberInvalid) return;
+
+    // Capacity can change between page load and submit — re-check against
+    // the freshest stats before building the transaction.
+    if (capacityVerified && poolStats) {
+      const fresh = computePoolCapacity(poolStats);
+      if (amount > fresh.maxCoverage) {
+        setSubmission({
+          status: "error",
+          message: fresh.exhausted
+            ? "Coverage is temporarily unavailable — the pool has no free capacity right now."
+            : `The pool can currently back up to ${formatUsd(fresh.maxCoverage)} of coverage. Try a smaller amount.`,
+        });
+        return;
+      }
+    }
 
     setSubmission({ status: "submitting" });
     try {
@@ -218,131 +262,145 @@ export default function CoverPage() {
                 )}
               </div>
 
-              {/* Amount + duration */}
-              <div>
-                <div className="mb-3 text-[11px] uppercase tracking-wide text-pm-text/40">2. Coverage Amount</div>
-                <Input
-                  type="number"
-                  value={coverageAmount}
-                  onChange={(e) => setCoverageAmount(e.target.value)}
-                  aria-label="Coverage amount in USD"
-                />
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {QUICK_AMOUNTS.map((amt) => (
-                    <Button
-                      key={amt}
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setCoverageAmount(String(amt))}
-                    >
-                      {formatUsd(amt)}
-                    </Button>
-                  ))}
-                </div>
-                {amountInvalid && (
-                  <p className="mt-2 text-[11px] text-pm-red">
-                    Amount must be between {formatUsd(effectiveMin)} and {formatUsd(effectiveMax)}.
-                  </p>
-                )}
-              </div>
+              {ct && (
+                <Card>
+                  <div className="mb-3 text-[11px] uppercase tracking-wide text-pm-text/40">2. Configure</div>
 
-              <div>
-                <div className="mb-3 text-[11px] uppercase tracking-wide text-pm-text/40">3. Duration</div>
-                <div className="flex flex-wrap gap-2">
-                  {[7, 14, 30, 90].map((d) => (
-                    <Button
-                      key={d}
-                      variant={durationDays === d ? "primary" : "ghost"}
-                      size="sm"
-                      onClick={() => setDurationDays(d)}
-                    >
-                      {d} days
-                    </Button>
-                  ))}
-                </div>
-              </div>
-
-              {isFlightDelay && (
-                <div>
-                  <div className="mb-3 text-[11px] uppercase tracking-wide text-pm-text/40">4. Flight Number</div>
+                  <label className="mb-1.5 block text-xs font-medium text-pm-text/60" htmlFor="coverage-amount">
+                    Coverage amount (USDC)
+                  </label>
                   <Input
-                    value={flightNumber}
-                    onChange={(e) => setFlightNumber(e.target.value)}
-                    placeholder="e.g. AA1234"
-                    aria-label="Flight number"
+                    id="coverage-amount"
+                    type="number"
+                    min={effectiveMin}
+                    max={effectiveMax}
+                    value={coverageAmount}
+                    onChange={(e) => setCoverageAmount(e.target.value)}
+                    aria-invalid={amountInvalid}
+                    aria-describedby={amountError ? "coverage-amount-error" : undefined}
                   />
-                  {flightNumberInvalid && (
-                    <p className="mt-2 text-[11px] text-pm-red">Enter the flight number to monitor.</p>
+                  {amountError && (
+                    <p id="coverage-amount-error" className="mt-1.5 text-[11px] text-pm-red">
+                      {amountError}
+                    </p>
                   )}
-                </div>
+
+                  <div className="mt-2.5 flex flex-wrap gap-2">
+                    {QUICK_AMOUNTS.map((quick) => {
+                      const disabled = quick > effectiveMax;
+                      return (
+                        <button
+                          key={quick}
+                          type="button"
+                          disabled={disabled}
+                          onClick={() => setCoverageAmount(String(quick))}
+                          className={`rounded-lg border px-2.5 py-1 text-[11px] transition-colors ${
+                            disabled
+                              ? "cursor-not-allowed border-pm-border/50 text-pm-text/25"
+                              : "border-pm-border text-pm-text/60 hover:border-pm-violet/50 hover:text-pm-text"
+                          }`}
+                        >
+                          {formatUsd(quick)}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <label className="mb-1.5 mt-4 block text-xs font-medium text-pm-text/60" htmlFor="duration-days">
+                    Duration (days)
+                  </label>
+                  <Input
+                    id="duration-days"
+                    type="number"
+                    min={1}
+                    max={365}
+                    value={durationDays}
+                    onChange={(e) => setDurationDays(Math.max(1, Math.min(365, parseInt(e.target.value) || 1)))}
+                  />
+
+                  {isFlightDelay && (
+                    <>
+                      <label className="mb-1.5 mt-4 block text-xs font-medium text-pm-text/60" htmlFor="flight-number">
+                        Flight number
+                      </label>
+                      <Input
+                        id="flight-number"
+                        value={flightNumber}
+                        onChange={(e) => setFlightNumber(e.target.value)}
+                        placeholder="e.g. AA100"
+                        aria-invalid={flightNumberInvalid}
+                      />
+                      {flightNumberInvalid && (
+                        <p className="mt-1.5 text-[11px] text-pm-red">Enter the flight number to monitor.</p>
+                      )}
+                    </>
+                  )}
+                </Card>
               )}
             </div>
 
-            {/* Right: Summary */}
+            {/* Right: Quote panel */}
             <Card className="lg:sticky lg:top-6">
-              <div className="mb-4 flex items-center gap-2">
-                <span aria-hidden="true" className="text-2xl">
-                  {meta.icon}
-                </span>
-                <div>
-                  <div className="text-sm font-semibold text-pm-text">{ct?.name ?? meta.name}</div>
-                  <div className="text-[11px] text-pm-text/45">{meta.oracleSource}</div>
-                </div>
-              </div>
+              <div className="mb-3 text-[11px] uppercase tracking-wide text-pm-text/40">Quote</div>
 
-              <div className="mb-4 flex flex-col gap-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-pm-text/45">Coverage</span>
-                  <span className="text-pm-text">{formatUsd(parseFloat(coverageAmount) || 0)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-pm-text/45">Duration</span>
-                  <span className="text-pm-text">{durationDays} days</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-pm-text/45">Expires</span>
-                  <span className="text-pm-text">{expiryDate}</span>
-                </div>
-                <div className="flex justify-between border-t border-pm-border pt-2">
-                  <span className="text-pm-text/45">Premium</span>
-                  <span className="font-semibold text-pm-text">{formatUsd(premium)}</span>
-                </div>
-              </div>
+              {ct ? (
+                <div className="flex flex-col gap-2.5 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-pm-text/50">Coverage</span>
+                    <span className="font-semibold text-pm-text">{formatUsd(parseFloat(coverageAmount) || 0)}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-pm-text/50">Premium</span>
+                    <span className="font-semibold text-pm-text">{formatUsd(premium)}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-pm-text/50">Expires</span>
+                    <span className="text-pm-text/80">{expiryDate}</span>
+                  </div>
 
-              <div className="mb-4">
-                <div className="mb-1 flex justify-between text-[11px] text-pm-text/45">
-                  <span>Risk</span>
-                  <span>{meta.riskLevel}</span>
-                </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-pm-border">
-                  <div
-                    className="h-full rounded-full"
-                    style={{
-                      width: `${meta.riskHeatPct}%`,
-                      backgroundColor: RISK_LEVEL_COLORS[meta.riskLevel],
-                    }}
-                  />
-                </div>
-              </div>
+                  <div className="mt-1 border-t border-pm-border pt-2.5">
+                    {poolLoading ? (
+                      <p className="text-[11px] text-pm-text/40">Checking pool capacity…</p>
+                    ) : capacity ? (
+                      <p className="text-[11px] text-pm-text/50">
+                        Pool can back up to{" "}
+                        <span className="font-semibold text-pm-text/80">{formatUsd(capacity.maxCoverage)}</span>{" "}
+                        of coverage right now.
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-pm-amber">
+                        Pool capacity couldn&apos;t be verified{poolError ? ` (${poolError})` : ""} — the amount
+                        limit shown may not reflect what the pool can actually back.
+                      </p>
+                    )}
+                  </div>
 
-              <Button
-                variant="primary"
-                className="w-full"
-                onClick={handleBuy}
-                disabled={submission.status === "submitting" || submission.status === "signing"}
-              >
-                {wallet.status === "connected" ? "Buy Coverage" : "Connect Wallet"}
-              </Button>
+                  <Button
+                    className="mt-2"
+                    onClick={handleBuy}
+                    disabled={submission.status === "submitting" || submission.status === "signing"}
+                  >
+                    {wallet.status !== "connected"
+                      ? "Connect Wallet"
+                      : submission.status === "submitting"
+                        ? "Building transaction…"
+                        : submission.status === "signing"
+                          ? "Awaiting signature…"
+                          : "Buy Coverage"}
+                  </Button>
 
-              {submission.status === "success" && (
-                <p className="mt-3 text-[11px] text-pm-green">
-                  {submission.demo
-                    ? "Simulated locally — no real transaction was submitted."
-                    : `Policy purchased. Tx: ${truncateAddress(submission.txHash ?? "")}`}
-                </p>
-              )}
-              {submission.status === "error" && (
-                <p className="mt-3 text-[11px] text-pm-red">{submission.message}</p>
+                  {submission.status === "error" && (
+                    <p className="text-[11px] text-pm-red">{submission.message}</p>
+                  )}
+                  {submission.status === "success" && (
+                    <p className="text-[11px] text-pm-green">
+                      {submission.demo ? "Simulated locally (demo)." : "Coverage purchased."}
+                      {submission.txHash ? ` ${truncateAddress(submission.txHash)}` : ""}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-pm-text/40">Select a coverage type to see your quote.</p>
               )}
             </Card>
           </div>
