@@ -72,3 +72,5 @@ export const Toast = forwardRef<HTMLDivElement, ToastProps>(function Toast(
     </div>
   );
 });
+
+export default Toast;
