@@ -9,6 +9,7 @@ import { useClaims } from "@/hooks/useClaims";
 import { usePagination } from "@/hooks/usePagination";
 import { formatUsd, fromStroops } from "@/lib/format";
 import { stellarExpertTxUrl } from "@/lib/stellar";
+import { getCoverageIcon, getCoverageColor } from "@/lib/coverage/metadata";
 import type { Policy } from "@/lib/api/policies";
 import type { ClaimRecord } from "@/lib/api/claims";
 
@@ -18,9 +19,21 @@ const PAGE_SIZE = 10;
 
 type PolicyStatus = "active" | "paid" | "expired";
 
-function policyStatus(policy: Policy, claims: ClaimRecord[]): PolicyStatus {
+function policyStatus(policy: Policy, claims: ClaimRecord[], claimsLoading: boolean): PolicyStatus {
   const claim = claims.find((c) => c.policyId === policy.id);
   if (claim?.triggered) return "paid";
+  if (claimsLoading) return policy.isActive ? "active" : "expired";
+  return policy.isActive ? "active" : "expired";
+}
+
+const STATUS_BADGE: Record<PolicyStatus, { tone: "safe" | "violet" | "neutral"; label: string }> = {
+  active: { tone: "safe"
+type PolicyStatus = "active" | "paid" | "expired";
+
+function policyStatus(policy: Policy, claims: ClaimRecord[], claimsLoading: boolean): PolicyStatus {
+  const claim = claims.find((c) => c.policyId === policy.id);
+  if (claim?.triggered) return "paid";
+  if (claimsLoading) return policy.isActive ? "active" : "expired";
   return policy.isActive ? "active" : "expired";
 }
 
@@ -34,7 +47,7 @@ export default function DashboardPage() {
   const wallet = useWallet();
   const address = wallet.status === "connected" ? wallet.address : null;
   const { data: policies, loading, error, source } = useHolderPolicies(address);
-  const claims = useClaims(address, policies);
+  const { data: claims, loading: claimsLoading, error: claimsError } = useClaims(address, policies);
 
   const policyList = policies ?? [];
   const claimList = claims ?? [];
@@ -43,12 +56,14 @@ export default function DashboardPage() {
 
   const summary = policies
     ? {
-        active: policies.filter((p) => policyStatus(p, claims) === "active").length,
+        active: policies.filter((p) => policyStatus(p, claims, claimsLoading) === "active").length,
         totalCoverage: policies.reduce((sum, p) => sum + fromStroops(p.coverageAmount), 0),
         totalPremiums: policies.reduce((sum, p) => sum + fromStroops(p.premium), 0),
         totalPayouts: claims.filter((c) => c.triggered).reduce((sum, c) => sum + fromStroops(c.payout), 0),
       }
     : null;
+
+  const summaryLoading = loading || claimsLoading || !summary;
 
   return (
     <div className="min-h-screen bg-pm-bg">
@@ -99,7 +114,7 @@ export default function DashboardPage() {
             <>
               {/* Summary */}
               <div className="mb-7 grid grid-cols-2 gap-3.5 sm:grid-cols-4">
-                {loading || !summary
+                {summaryLoading
                   ? Array.from({ length: 4 }).map((_, i) => (
                       <Card key={i} padding="sm" className="!p-[18px]">
                         <Skeleton height={11} width={70} className="mb-2.5" />
@@ -153,7 +168,7 @@ export default function DashboardPage() {
                 {!loading && policies && policies.length > 0 && (
                   <div className="flex flex-col gap-3">
                     {policiesPagination.visible.map((policy) => {
-                      const status = policyStatus(policy, claims);
+                      const status = policyStatus(policy, claims, claimsLoading);
                       const badge = STATUS_BADGE[status];
                       return (
                         <Card key={policy.id} padding="md" className="!py-4">
@@ -161,18 +176,17 @@ export default function DashboardPage() {
                             <div className="flex items-center gap-3.5">
                               <span
                                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-lg"
-                                style={{ background: `${COVERAGE_COLORS[policy.coverageType]}18` }}
+                                style={{ background: `${getCoverageColor(policy.coverageType)}18` }}
                                 aria-hidden="true"
                               >
-                                {COVERAGE_ICONS[policy.coverageType]}
+                                {getCoverageIcon(policy.coverageType)}
                               </span>
                               <div>
-                                <div className="mb-0.5 flex items-center gap-2">
-                                  <span className="text-sm font-semibold text-pm-text">{policy.coverageTypeName}</span>
-                                  <Badge tone={badge.tone}>{badge.label}</Badge>
+                                <div className="mb-0.5 font-display text-[15px] font-bold text-pm-text">
+                                  {policy.coverageTypeName}
                                 </div>
                                 <div className="text-xs text-pm-text/40">
-                                  Policy #{policy.id} · {formatUsd(fromStroops(policy.coverageAmount), { maximumFractionDigits: 0 })} coverage · expires {policy.expiresAt}
+                                  {formatUsd(fromStroops(policy.coverageAmount), { maximumFractionDigits: 0 })} coverage
                                 </div>
                               </div>
                             </div>
@@ -217,13 +231,27 @@ export default function DashboardPage() {
                   Claim History
                 </h2>
 
-                {!loading && claimList.length === 0 && (
+                {claimsError && (
+                  <Card className="border-pm-red/30 !bg-pm-red/[0.04]">
+                    <p className="text-sm text-pm-red">Couldn&apos;t load claims: {claimsError}</p>
+                  </Card>
+                )}
+
+                {claimsLoading && (
+                  <div className="flex flex-col gap-3" role="status" aria-label="Loading claims">
+                    {Array.from({ length: 2 }).map((_, i) => (
+                      <Skeleton key={i} height={72} rounded="md" />
+                    ))}
+                  </div>
+                )}
+
+                {!claimsLoading && claimList.length === 0 && (
                   <Card className="py-12 text-center">
                     <p className="text-sm text-pm-text/45">No claims filed yet.</p>
                   </Card>
                 )}
 
-                {!loading && claimList.length > 0 && (
+                {!claimsLoading && claimList.length > 0 && (
                   <div className="flex flex-col gap-3">
                     {claimsPagination.visible.map((claim) => (
                       <Card key={claim.id} padding="md" className="!py-4">

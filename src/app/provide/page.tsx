@@ -12,6 +12,7 @@ import { useLockupStatus } from "@/hooks/useLockupStatus";
 import { provideCapital, withdrawCapital, type ProvideCapitalResponse, type WithdrawCapitalResponse } from "@/lib/api/pool";
 import { ApiUnreachableError } from "@/lib/api/client";
 import { formatUsd, formatCompactUsd, formatSharePrice, fromStroops, toStroops } from "@/lib/format";
+import { estimateYield, apyBpsToRate } from "@/lib/pool/yield";
 import { signAndSubmit } from "@/lib/wallet/signAndSubmit";
 import { truncateAddress } from "@/lib/wallet/WalletProvider";
 
@@ -57,6 +58,19 @@ export default function ProvidePage() {
 
   const utilizationPct = pool ? pool.utilizationBps / 100 : 0;
   const maxUtilizationPct = pool ? pool.maxUtilizationBps / 100 : 80;
+
+  // The pool APY tile and the 30-day estimate must agree, so both derive
+  // from the same source value. When pool stats are unavailable we show an
+  // explicit unavailable label rather than silently falling back to a
+  // fixture number.
+  const apyBps = pool?.apyBps;
+  const apyAvailable = typeof apyBps === "number" && Number.isFinite(apyBps);
+  const apyPct = apyAvailable ? apyBpsToRate(apyBps) * 100 : null;
+
+  const parsedAmount = parseFloat(amount);
+  const amountValid = Number.isFinite(parsedAmount) && parsedAmount > 0;
+  const estimated30dYield =
+    apyAvailable && amountValid ? estimateYield(parsedAmount, apyBps, 30) : null;
 
   // Illustrative risk breakdown passed to the accessible donut chart.
   const riskSegments = useMemo(
@@ -189,6 +203,7 @@ export default function ProvidePage() {
               ) : (
                 <div className="font-display text-xl font-bold text-pm-text">{formatUsd(availableToWithdraw)}</div>
               )}
+              )}
             </Card>
           </div>
 
@@ -249,6 +264,18 @@ export default function ProvidePage() {
                   )}
                 </div>
 
+                {tab === "deposit" && (
+                  <p className="mt-2 text-[11px] leading-relaxed text-pm-text/40">
+                    Estimate only, not guaranteed. Assumes the current pool APY holds for 30 days (30/365 of the
+                    annual rate, simple interest) and that no coverage triggers fire.
+                  </p>
+                )}
+
+                {withdrawInvalid && (
+                    </div>
+                  )}
+                </div>
+
                 {amount && parseFloat(amount) > 0 && (
                   <div className="mb-4 space-y-1.5 rounded-lg bg-pm-bg/60 p-3 text-xs">
                     {tab === "deposit" ? (
@@ -269,8 +296,17 @@ export default function ProvidePage() {
                   </div>
                 )}
 
+                {tab === "deposit" && (
+                  <p className="mt-2 text-[11px] leading-relaxed text-pm-text/40">
+                    Estimate only, not guaranteed. Assumes the current pool APY holds for 30 days (30/365 of the
+                    annual rate, simple interest) and that no coverage triggers fire.
+                  </p>
+                )}
+
                 {withdrawInvalid && (
-                  <p className="mb-4 text-xs text-pm-red">Amount exceeds your available balance.</p>
+                  <p className="mb-4 text-xs text-pm-red">
+                    Amount exceeds your withdrawable balance of {formatUsd(availableToWithdraw)}.
+                  </p>
                 )}
                 {tab === "withdraw" && isLocked && (
                   <p className="mb-4 text-xs text-pm-amber">
@@ -278,7 +314,25 @@ export default function ProvidePage() {
                   </p>
                 )}
 
+                {submission.status === "error" && (
+                  <p className="mt-3 text-xs text-pm-red">{submission.message}</p>
+                )}
+
+                {submission.status === "success" && (
+                  <div className="mt-4 rounded-xl border border-pm-green/30 bg-pm-green/5 p-3 text-xs text-pm-text/70">
+                    {submission.demo ? (
+                      <p>Simulated locally — the Refract API is unreachable in this environment.</p>
+                    ) : (
+                      <p>
+                        {submission.kind === "deposit" ? "Deposit" : "Withdrawal"} submitted
+                        {submission.txHash ? ` — ${truncateAddress(submission.txHash)}` : ""}.
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 <Button
+                  className="mt-5 w-full"
                   onClick={handleSubmit}
                   disabled={
                     submission.status === "submitting" ||
@@ -351,7 +405,6 @@ export default function ProvidePage() {
                     ))}
                   </ul>
                 </div>
-
                 <h2 className="mb-4 mt-6 font-display text-sm font-bold text-pm-text">Pool Stats</h2>
                 <div className="space-y-3 text-xs">
                   <div className="flex justify-between">
@@ -376,7 +429,6 @@ export default function ProvidePage() {
                       {utilizationPct.toFixed(1)}% / {maxUtilizationPct.toFixed(0)}%
                     </span>
                   </div>
-                </div>
                 </div>
               </Card>
 
@@ -404,6 +456,15 @@ export default function ProvidePage() {
                     </Badge>
                   </div>
                 </div>
+              </Card>
+
+              <Card className="p-5">
+                <h3 className="mb-2 font-display text-sm font-bold text-pm-text">Risk Disclosure</h3>
+                <p className="text-[11px] leading-relaxed text-pm-text/45">
+                  Providing capital is not risk-free. If a covered event triggers, pool capital is used to pay
+                  claims and your position can lose value. Yields shown are estimates, not guarantees, and past
+                  performance does not predict future results.
+                </p>
               </Card>
             </div>
           </div>

@@ -16,6 +16,29 @@ import { truncateAddress } from "@/lib/wallet/WalletProvider";
 import { signAndSubmit } from "@/lib/wallet/signAndSubmit";
 import { coverageMeta, RISK_LEVEL_COLORS } from "@/lib/coverage/metadata";
 
+// Neutral fallbacks for risk levels the backend may introduce before this
+// client knows about them. Deliberately muted so an unknown level never
+// implies a specific risk tier the policy doesn't actually have.
+const NEUTRAL_RISK_COLOR = "#6b7280";
+const NEUTRAL_RISK_HEAT = 50;
+
+function riskColor(riskLevel: string | undefined): string {
+  if (riskLevel && Object.prototype.hasOwnProperty.call(RISK_TAG_COLORS, riskLevel)) {
+    return RISK_TAG_COLORS[riskLevel] as string;
+  }
+  if (process.env.NODE_ENV !== "production" && riskLevel !== undefined) {
+    console.warn(`[cover] Unknown risk level "${riskLevel}" — using neutral fallback`);
+  }
+  return NEUTRAL_RISK_COLOR;
+}
+
+function riskHeat(riskLevel: string | undefined): number {
+  if (riskLevel && Object.prototype.hasOwnProperty.call(RISK_HEAT, riskLevel)) {
+    return RISK_HEAT[riskLevel] as number;
+  }
+  return NEUTRAL_RISK_HEAT;
+}
+
 const QUICK_AMOUNTS = [1_000, 5_000, 10_000, 25_000];
 
 export default function CoverPage() {
@@ -37,7 +60,7 @@ export default function CoverPage() {
   >({ status: "idle" });
   const radioRefs = useRef<Record<number, HTMLButtonElement | null>>({});
 
-  const ct = coverageTypes?.[selectedType];
+  const ct = coverageTypes?.find((t) => t.id === selectedType);
   const meta = coverageMeta(ct?.id ?? selectedType);
 
   const premium = useMemo(() => {
@@ -211,6 +234,7 @@ export default function CoverPage() {
                       if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
                       e.preventDefault();
                       const ids = coverageTypes.map((t) => t.id);
+                      if (ids.length === 0) return;
                       const currentIndex = ids.indexOf(selectedType);
                       let nextIndex = currentIndex;
                       if (e.key === "ArrowDown") nextIndex = (currentIndex + 1) % ids.length;
@@ -218,12 +242,14 @@ export default function CoverPage() {
                       if (e.key === "Home") nextIndex = 0;
                       if (e.key === "End") nextIndex = ids.length - 1;
                       const nextId = ids[nextIndex];
+                      if (nextId === undefined) return;
                       setSelectedType(nextId);
                       radioRefs.current[nextId]?.focus();
                     }}
                   >
                     {coverageTypes.map((t) => {
                       const tMeta = coverageMeta(t.id);
+                      const selected = t.id === selectedType;
                       const selected = t.id === selectedType;
                       return (
                         <button
